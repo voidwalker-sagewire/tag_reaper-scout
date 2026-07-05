@@ -1,3 +1,32 @@
 plugins {
-    id 'com.android.application' version '8.2.0' apply false
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.herdmate.tagreaperscout'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.herdmate.tagreaperscout"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0-phase1"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    // Phase 2 will add: implementation files('libs/DeviceAPI_ver20251103_release.aar')
 }
