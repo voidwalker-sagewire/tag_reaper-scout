@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Cattle Tag Scanner</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+  :root {
+    --bg:#0d1117;--panel:#161b22;--border:#30363d;--green:#3fb950;--green-dim:#1a4d2b;
+    --amber:#d29922;--amber-dim:#3d2e00;--red:#f85149;--text:#e6edf3;--muted:#7d8590;--accent:#58a6ff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;min-height:100vh;display:flex;flex-direction:column;}
+  header{background:var(--panel);border-bottom:1px solid var(--border);padding:12px 16px;display:flex;align-items:center;gap:12px;position:sticky;top:0;z-index:100;}
+  .brand{font-family:'Bebas Neue',sans-serif;font-size:1.6rem;letter-spacing:2px;color:var(--green);}
+  .brand span{color:var(--text);}
+  .hdr-btns{margin-left:auto;display:flex;gap:8px;}
+  .pasture-bar{background:#0e1f14;border-bottom:2px solid var(--green);padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .pasture-label{font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--green);font-weight:600;white-space:nowrap;}
+  #pastureInput{background:#0d1117;border:1px solid var(--green);border-radius:8px;color:var(--text);font-family:'IBM Plex Sans',sans-serif;font-size:1rem;font-weight:600;padding:8px 14px;flex:1;min-width:160px;outline:none;}
+  #pastureInput::placeholder{color:var(--muted);font-weight:400;font-size:0.85rem;}
+  .btn{display:flex;align-items:center;gap:6px;padding:8px 14px;border-radius:8px;border:1px solid var(--border);cursor:pointer;font-family:'IBM Plex Sans',sans-serif;font-size:0.8rem;font-weight:600;transition:all 0.15s;background:var(--panel);color:var(--text);white-space:nowrap;}
+  .btn:hover{border-color:var(--accent);color:var(--accent);}
+  .btn.green{background:var(--green);border-color:var(--green);color:#000;}
+  .btn.green:hover{background:#5ad368;}
+  .btn.danger:hover{border-color:var(--red);color:var(--red);}
+  .btn.sm{padding:6px 10px;font-size:0.75rem;}
+  .scan-zone{margin:14px 16px 8px;background:var(--panel);border:2px dashed var(--border);border-radius:12px;padding:14px 16px;transition:all 0.2s;}
+  .scan-zone.active{border-color:var(--green);background:#0e1f14;}
+  .scan-hint{font-size:0.75rem;color:var(--muted);margin-bottom:8px;text-align:center;}
+  .scan-hint.warn{color:var(--amber);}
+  .scan-row{display:flex;gap:8px;}
+  #tagInput{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:1rem;padding:10px 14px;outline:none;transition:border-color 0.15s;}
+  #tagInput:focus{border-color:var(--green);}
+  #tagInput:disabled{opacity:0.4;cursor:not-allowed;}
+  #tagInput::placeholder{color:var(--muted);font-size:0.82rem;font-family:'IBM Plex Sans',sans-serif;}
+  #addBtn{padding:10px 18px;background:var(--green);border:none;border-radius:8px;color:#000;font-weight:700;font-size:0.88rem;cursor:pointer;font-family:'IBM Plex Sans',sans-serif;transition:background 0.15s;}
+  #addBtn:hover{background:#5ad368;}
+  #addBtn:disabled{opacity:0.4;cursor:not-allowed;}
+  .stats-row{display:flex;gap:8px;padding:0 16px 10px;flex-wrap:wrap;}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 14px;display:flex;align-items:center;gap:8px;}
+  .stat .n{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;line-height:1;color:var(--green);}
+  .stat .n.amber{color:var(--amber);}
+  .stat .l{font-size:0.65rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);}
+  .pasture-tabs{display:flex;gap:6px;padding:0 16px 10px;flex-wrap:wrap;}
+  .tab{display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;border:1px solid var(--border);font-size:0.75rem;font-weight:600;cursor:pointer;transition:all 0.15s;background:var(--panel);color:var(--muted);}
+  .tab:hover{border-color:var(--accent);color:var(--accent);}
+  .tab.active{background:var(--green-dim);border-color:var(--green);color:var(--green);}
+  .tab .count{background:#ffffff22;border-radius:10px;padding:1px 6px;font-size:0.68rem;}
+  .table-wrap{flex:1;overflow-x:auto;padding:0 16px 80px;}
+  table{width:100%;border-collapse:collapse;font-size:0.82rem;}
+  thead th{background:var(--panel);border-bottom:2px solid var(--border);padding:9px 12px;text-align:left;font-size:0.65rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);white-space:nowrap;position:sticky;top:0;}
+  tbody tr{border-bottom:1px solid var(--border);transition:background 0.1s;}
+  tbody tr:hover{background:var(--panel);}
+  tbody tr.new-row{animation:rowIn 0.3s ease-out;}
+  @keyframes rowIn{from{background:#1a4d2b;opacity:0.6;}to{background:transparent;opacity:1;}}
+  tbody td{padding:9px 12px;vertical-align:middle;}
+  .tag-id{font-family:'IBM Plex Mono',monospace;font-weight:600;color:var(--accent);font-size:0.88rem;}
+  .pasture-chip{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:600;border:1px solid;}
+  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:0.68rem;font-weight:600;letter-spacing:0.5px;}
+  .badge.new-tag{background:var(--green-dim);color:var(--green);border:1px solid var(--green);}
+  .badge.dup{background:#3d2020;color:var(--red);border:1px solid var(--red);}
+  .del-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:0.9rem;padding:2px 6px;border-radius:4px;transition:color 0.15s;}
+  .del-btn:hover{color:var(--red);}
+  .empty-state{text-align:center;padding:48px 20px;color:var(--muted);}
+  .empty-state .icon{font-size:2.8rem;margin-bottom:10px;}
+  .empty-state p{font-size:0.88rem;}
+  .export-bar{position:fixed;bottom:0;left:0;right:0;background:var(--panel);border-top:1px solid var(--border);padding:10px 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;z-index:50;}
+  .export-label{font-size:0.75rem;color:var(--muted);margin-right:4px;}
+  .toast{position:fixed;bottom:70px;left:50%;transform:translateX(-50%) translateY(60px);background:var(--panel);border:1px solid var(--green);color:var(--green);padding:9px 18px;border-radius:8px;font-size:0.82rem;font-weight:600;transition:transform 0.25s ease;z-index:999;pointer-events:none;white-space:nowrap;}
+  .toast.show{transform:translateX(-50%) translateY(0);}
+  .pc-0{color:#58a6ff;border-color:#58a6ff;background:#0d2137;}
+  .pc-1{color:#e8b85d;border-color:#e8b85d;background:#2c2000;}
+  .pc-2{color:#bc8cff;border-color:#bc8cff;background:#1e0d33;}
+  .pc-3{color:#ff7b72;border-color:#ff7b72;background:#3d0e0e;}
+  .pc-4{color:#79c0ff;border-color:#79c0ff;background:#091d2c;}
+  .pc-5{color:#56d364;border-color:#56d364;background:#0d2b14;}
+  .pc-6{color:#ffa657;border-color:#ffa657;background:#2c1800;}
+  .pc-7{color:#d2a8ff;border-color:#d2a8ff;background:#1f0d33;}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">CATTLE<span>SCAN</span></div>
+  <div class="hdr-btns">
+    <button class="btn sm danger" onclick="clearAll()">🗑 Clear All</button>
+  </div>
+</header>
+
+<div class="pasture-bar">
+  <span class="pasture-label">📍 Pasture:</span>
+  <input id="pastureInput" placeholder="Type pasture name, press Enter" autocomplete="off" spellcheck="false" />
+  <button class="btn green" onclick="setPasture()">Set Pasture</button>
+</div>
+
+<div class="scan-zone" id="scanZone">
+  <div class="scan-hint warn" id="scanHint">⚠ Set a pasture name above before scanning</div>
+  <div class="scan-row">
+    <input id="tagInput" type="text" placeholder="Enter pasture first..." disabled
+      autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+    <button id="addBtn" disabled onclick="addTag()">ADD</button>
+  </div>
+</div>
+
+<div class="stats-row">
+  <div class="stat"><div class="n" id="totalCount">0</div><div class="l">Total Scans</div></div>
+  <div class="stat"><div class="n" id="uniqueCount">0</div><div class="l">Unique Tags</div></div>
+  <div class="stat"><div class="n amber" id="dupCount">0</div><div class="l">Duplicates</div></div>
+  <div class="stat"><div class="n" id="pastureCountStat">0</div><div class="l">Pastures</div></div>
+</div>
+
+<div class="pasture-tabs" id="pastureTabs"></div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>EPC / Tag ID</th><th>Pasture</th><th>Time</th><th>Date</th><th>Status</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="tableBody"></tbody>
+  </table>
+</div>
+
+<div class="export-bar">
+  <span class="export-label">Export:</span>
+  <button class="btn green sm" onclick="exportCSV()">⬇ All (CSV)</button>
+  <button class="btn sm" onclick="exportByPasture()">⬇ By Pasture (CSV)</button>
+  <button class="btn sm" onclick="exportExcel()">⬇ Excel</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  var scans = [];
+  var currentPasture = '';
+  var filterPasture = 'all';
+  var COLORS = ['pc-0','pc-1','pc-2','pc-3','pc-4','pc-5','pc-6','pc-7'];
+  var pastureColors = {};
+  var colorIdx = 0;
+
+  function getPastureColor(name) {
+    if (!pastureColors[name]) { pastureColors[name] = COLORS[colorIdx % COLORS.length]; colorIdx++; }
+    return pastureColors[name];
+  }
+
+  var pastureInput = document.getElementById('pastureInput');
+  var tagInput = document.getElementById('tagInput');
+  var addBtn = document.getElementById('addBtn');
+  var scanZone = document.getElementById('scanZone');
+  var scanHint = document.getElementById('scanHint');
+
+  pastureInput.addEventListener('keydown', function(e){ if(e.key==='Enter'){e.preventDefault();setPasture();} });
+  tagInput.addEventListener('keydown', function(e){ if(e.key==='Enter'){e.preventDefault();addTag();} });
+
+  function setPasture() {
+    var name = pastureInput.value.trim();
+    if (!name) { showToast('Enter a pasture name first'); return; }
+    currentPasture = name;
+    getPastureColor(name);
+    scanHint.textContent = '📍 Scanning into: ' + name;
+    scanHint.className = 'scan-hint';
+    tagInput.disabled = false;
+    tagInput.placeholder = 'Scan tag or type EPC...';
+    addBtn.disabled = false;
+    tagInput.focus();
+    showToast('Pasture set: ' + name);
+    renderTabs();
+  }
+
+  function addTag() {
+    var raw = tagInput.value.trim();
+    if (!raw || !currentPasture) return;
+    var now = new Date();
+    var timeStr = now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    var dateStr = now.toLocaleDateString();
+    var isDup = scans.some(function(s){return s.tag===raw;});
+    scans.unshift({tag:raw, pasture:currentPasture, time:timeStr, date:dateStr, dup:isDup});
+    tagInput.value = '';
+    renderTable();
+    renderTabs();
+    updateStats();
+    scanZone.classList.add('active');
+    setTimeout(function(){scanZone.classList.remove('active');}, 350);
+    showToast(isDup ? '⚠ Dup: '+raw : '✓ '+raw, isDup);
+    tagInput.focus();
+  }
+
+  function renderTabs() {
+    var pastures = [];
+    scans.forEach(function(s){ if(pastures.indexOf(s.pasture)===-1) pastures.push(s.pasture); });
+    var tabs = document.getElementById('pastureTabs');
+    if (pastures.length === 0) { tabs.innerHTML=''; return; }
+    var html = '<div class="tab '+(filterPasture==='all'?'active':'')+'" onclick="setFilter(\'all\')">All <span class="count">'+scans.length+'</span></div>';
+    pastures.forEach(function(p){
+      var cnt = scans.filter(function(s){return s.pasture===p;}).length;
+      var col = getPastureColor(p);
+      html += '<div class="tab '+(filterPasture===p?'active':'')+'" onclick="setFilter(\''+escJs(p)+'\')"><span class="pasture-chip '+col+'" style="border:none;background:none;padding:0">'+esc(p)+'</span><span class="count">'+cnt+'</span></div>';
+    });
+    tabs.innerHTML = html;
+  }
+
+  function setFilter(name) { filterPasture=name; renderTable(); renderTabs(); }
+
+  function renderTable() {
+    var tbody = document.getElementById('tableBody');
+    var filtered = filterPasture==='all' ? scans : scans.filter(function(s){return s.pasture===filterPasture;});
+    if (filtered.length===0) {
+      tbody.innerHTML='<tr><td colspan="7"><div class="empty-state"><div class="icon">🐄</div><p>'+(scans.length===0?'No tags scanned yet. Set a pasture and start scanning.':'No tags in this pasture yet.')+'</p></div></td></tr>';
+      return;
+    }
+    tbody.innerHTML = filtered.map(function(s,i){
+      var col = getPastureColor(s.pasture);
+      return '<tr class="'+(i===0&&filterPasture==='all'?'new-row':'')+'"><td style="color:var(--muted);font-size:0.75rem">'+(filtered.length-i)+'</td><td class="tag-id">'+esc(s.tag)+'</td><td><span class="pasture-chip '+col+'">'+esc(s.pasture)+'</span></td><td style="font-family:IBM Plex Mono,monospace;font-size:0.75rem">'+s.time+'</td><td style="color:var(--muted);font-size:0.75rem">'+s.date+'</td><td><span class="badge '+(s.dup?'dup':'new-tag')+'">'+(s.dup?'DUP':'NEW')+'</span></td><td><button class="del-btn" onclick="deleteRow(\''+escJs(s.tag)+'\',\''+escJs(s.pasture)+'\',\''+escJs(s.time)+'\')">✕</button></td></tr>';
+    }).join('');
+  }
+
+  function deleteRow(tag,pasture,time) {
+    var idx = scans.findIndex(function(s){return s.tag===tag&&s.pasture===pasture&&s.time===time;});
+    if(idx!==-1) scans.splice(idx,1);
+    renderTable(); renderTabs(); updateStats();
+  }
+
+  function updateStats() {
+    document.getElementById('totalCount').textContent = scans.length;
+    var tags = {}; scans.forEach(function(s){tags[s.tag]=1;});
+    document.getElementById('uniqueCount').textContent = Object.keys(tags).length;
+    document.getElementById('dupCount').textContent = scans.filter(function(s){return s.dup;}).length;
+    var ps = {}; scans.forEach(function(s){ps[s.pasture]=1;});
+    document.getElementById('pastureCountStat').textContent = Object.keys(ps).length;
+  }
+
+  function clearAll() {
+    if(!scans.length) return;
+    if(!confirm('Clear all '+scans.length+' scanned tags?')) return;
+    scans=[]; filterPasture='all'; renderTable(); renderTabs(); updateStats();
+  }
+
+  function exportCSV() {
+    if(!scans.length){showToast('No data to export');return;}
+    var rows=[['#','Tag EPC','Pasture','Time','Date','Status']];
+    scans.slice().reverse().forEach(function(s,i){rows.push([i+1,s.tag,s.pasture,s.time,s.date,s.dup?'DUPLICATE':'NEW']);});
+    download('cattle-tags-all.csv','text/csv',rows.map(function(r){return r.map(function(c){return '"'+c+'"';}).join(',');}).join('\n'));
+    showToast('CSV exported!');
+  }
+
+  function exportByPasture() {
+    if(!scans.length){showToast('No data to export');return;}
+    var pastures=[]; scans.forEach(function(s){if(pastures.indexOf(s.pasture)===-1)pastures.push(s.pasture);});
+    var csv='';
+    pastures.forEach(function(p){
+      var group=scans.filter(function(s){return s.pasture===p;}).slice().reverse();
+      csv+='"PASTURE: '+p+'"\n"#","Tag EPC","Pasture","Time","Date","Status"\n';
+      group.forEach(function(s,i){csv+='"'+(i+1)+'","'+s.tag+'","'+s.pasture+'","'+s.time+'","'+s.date+'","'+(s.dup?'DUPLICATE':'NEW')+'"\n';});
+      csv+='"Total: '+group.length+'"\n\n';
+    });
+    download('cattle-tags-by-pasture.csv','text/csv',csv);
+    showToast('Exported by pasture!');
+  }
+
+  function exportExcel() {
+    if(!scans.length){showToast('No data to export');return;}
+    var rows=[['#','Tag EPC','Pasture','Time','Date','Status']];
+    scans.slice().reverse().forEach(function(s,i){rows.push([i+1,s.tag,s.pasture,s.time,s.date,s.dup?'DUPLICATE':'NEW']);});
+    download('cattle-tags.xls','application/vnd.ms-excel',rows.map(function(r){return r.join('\t');}).join('\n'));
+    showToast('Excel exported!');
+  }
+
+  function download(filename,type,content) {
+    var blob=new Blob([content],{type:type});
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download=filename; a.click();
+  }
+
+  function showToast(msg,isWarn) {
+    var t=document.getElementById('toast');
+    t.textContent=msg;
+    t.style.borderColor=isWarn?'var(--amber)':'var(--green)';
+    t.style.color=isWarn?'var(--amber)':'var(--green)';
+    t.classList.add('show');
+    setTimeout(function(){t.classList.remove('show');},2000);
+  }
+
+  function esc(str){return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function escJs(str){return String(str).replace(/\\/g,'\\\\').replace(/'/g,"\\'");}
+
+  renderTable();
+</script>
+</body>
+</html>
