@@ -698,4 +698,708 @@
       if (epc) processIncomingTag(epc);
     });
   }
-  
+  function setBleBar(state, msg) {
+    var el = document.getElementById('bleBar');
+    if (!el) return;
+    el.textContent = msg;
+    el.className = 'status-bar ble-' + state;
+  }
+
+  function processIncomingTag(raw) {
+    if (!isValidCattleTag(raw)) return;
+    if (isDebounceDuplicate(raw)) return;
+    if (currentMode === 'hc') {
+      if (!currentPasture) return;
+      processHCTag(raw);
+    } else if (currentMode === 'bb') {
+      processBBScan(raw);
+    }
+  }
+
+  function isValidCattleTag(epc) {
+    if (!epc||epc.length<8||epc.length>30) return false;
+    if (!/^[A-Z0-9]+$/.test(epc)) return false;
+    if (/0{10,}/.test(epc)) return false;
+    return true;
+  }
+  function isDebounceDuplicate(epc) {
+    var now=Date.now(), last=lastScanTime[epc]||0;
+    if (now-last<2000) return true;
+    lastScanTime[epc]=now; return false;
+  }
+
+  function loadLocal() { sheetId=localStorage.getItem('hm_sheet_id')||''; operationName=localStorage.getItem('hm_operation')||''; }
+  function saveLocal(sid, opName) { localStorage.setItem('hm_sheet_id',sid); localStorage.setItem('hm_operation',opName); sheetId=sid; operationName=opName; }
+
+  function showScreen(id) {
+    ['chromeScreen','loginScreen','onboardScreen','appScreen'].forEach(function(s){
+      var el=document.getElementById(s);
+      el.className = s===id ? 'screen show' : 'screen';
+      if (s==='loginScreen'||s==='chromeScreen') { el.style.alignItems='center'; el.style.justifyContent='center'; el.style.padding='30px'; }
+      if (s==='onboardScreen') { el.style.alignItems='center'; el.style.justifyContent='center'; el.style.padding='24px'; }
+    });
+  }
+
+  window.switchMode=function(mode){
+    currentMode=mode;
+    document.getElementById('tabHC').className='mode-tab'+(mode==='hc'?' active-hc':'');
+    document.getElementById('tabBB').className='mode-tab'+(mode==='bb'?' active-bb':'');
+    document.getElementById('hcMode').style.display=mode==='hc'?'block':'none';
+    document.getElementById('bbMode').style.display=mode==='bb'?'flex':'none';
+  };
+
+  var lastLocStamp = null;
+  var lastLocStampFetch = 0;
+  var LOC_STAMP_CACHE_MS = 30 * 1000;
+
+  function fetchLocStamp(lat, lng, callback) {
+    var now = Date.now();
+    fetch(LOC_STAMP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ latitude: parseFloat(lat), longitude: parseFloat(lng) })
+    })
+    .then(function(r) {
+      if (!r.ok) throw new Error('loc/stamp returned ' + r.status);
+      return r.json();
+    })
+    .then(function(data) {
+      lastLocStamp = data;
+      lastLocStampFetch = now;
+      callback(data);
+    })
+    .catch(function(err) {
+      callback(null);
+    });
+  }
+
+  function startGPS() {
+    if (!navigator.geolocation){setGPSBar('err','📡 GPS not available');return;}
+    setGPSBar('searching','📡 Acquiring GPS...');
+    if (gpsWatcher!==null) navigator.geolocation.clearWatch(gpsWatcher);
+    gpsWatcher=navigator.geolocation.watchPosition(
+      function(pos){
+        lastGPS={
+          lat:pos.coords.latitude.toFixed(6),
+          lng:pos.coords.longitude.toFixed(6),
+          acc:Math.round(pos.coords.accuracy),
+          alt:pos.coords.altitude ? Math.round(pos.coords.altitude) : null,
+          altAcc:pos.coords.altitudeAccuracy ? Math.round(pos.coords.altitudeAccuracy) : null,
+          stamp:null
+        };
+        setGPSBar('ok','📡 GPS +/-'+lastGPS.acc+'m — '+lastGPS.lat+', '+lastGPS.lng+(lastGPS.alt!==null?' | '+lastGPS.alt+'m elev':''));
+
+        var now = Date.now();
+        if (now - lastLocStampFetch > LOC_STAMP_CACHE_MS) {
+          fetchLocStamp(lastGPS.lat, lastGPS.lng, function(stamp) {
+            if (stamp) {
+              lastGPS.stamp = stamp;
+              if (stamp.elevation !== undefined && lastGPS.alt === null) {
+                lastGPS.alt = stamp.elevation;
+              }
+            }
+          });
+        }
+      },
+      function(err){ lastGPS=null; setGPSBar('err',err.code===1?'📡 GPS blocked':'📡 GPS unavailable — tap to retry'); },
+      {enableHighAccuracy:true,maximumAge:5000,timeout:20000}
+    );
+  }
+  function setGPSBar(state,msg){var el=document.getElementById('gpsBar');if(!el)return;el.textContent=msg;el.className='status-bar gps-'+state;}
+  window.retryGPS=function(){startGPS();};
+
+  window.signIn=function(){if(tokenClient)tokenClient.requestAccessToken({prompt:''});else showToast('Loading...');};
+  window.signOut=function(){
+    if(accessToken){google.accounts.oauth2.revoke(accessToken,function(){});accessToken=null;}
+    if(bleDevice&&bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+    uniqueTags={};lastScanTime={};bbScans=[];
+    showScreen('loginScreen');
+  };
+  function onSignedIn() {
+    loadLocal();
+    if (sheetId&&operationName) launchApp();
+    else showScreen('onboardScreen');
+  }
+  function launchApp() {
+    document.getElementById('operationName').textContent=operationName;
+    showScreen('appScreen');
+    startGPS();
+    setSheetsBar('ok','✅ Connected — '+operationName);
+    renderSavedPastures();
+    flushOfflineQueue();
+    setInterval(flushOfflineQueue, 30000);
+  }
+
+  window.createWorkspace = function() {
+    var opName=document.getElementById('operationInput').value.trim();
+    if(!opName){showToast('Enter your operation name',true);return;}
+    operationName=opName;
+    var btn=document.getElementById('onboardBtn');
+    btn.disabled=true; btn.textContent='Setting up...';
+    document.getElementById('onboardProgress').style.display='block';
+    var sheetTitle='HerdMate — '+opName+' '+YEAR;
+    setStep('stepCreate','active','⏳ Creating your Google Sheet...');
+    fetch('https://sheets.googleapis.com/v4/spreadsheets',{
+      method:'POST',
+      headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
+      body:JSON.stringify({
+        properties:{title:sheetTitle},
+        sheets:[
+          {properties:{title:'Head Count',index:0}},
+          {properties:{title:'Bovine Beacon Log',index:1}},
+          {properties:{title:'Animals',index:2}}
+        ]
+      })
+    })
+    .then(function(r){return r.json();})
+    .then(function(data){
+      if(!data.spreadsheetId) throw new Error('Sheet creation failed');
+      sheetId=data.spreadsheetId;
+      setStep('stepCreate','done','✅ Google Sheet created');
+      setStep('stepTab','done','✅ Tabs created');
+      setStep('stepHeaders','active','⏳ Writing column headers...');
+      return fetch('https://sheets.googleapis.com/v4/spreadsheets/'+sheetId+'/values:batchUpdate',{
+        method:'POST',
+        headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},
+        body:JSON.stringify({
+          valueInputOption:'RAW',
+          data:[
+            {range:'Head Count!A1:P1',values:[['Session','Date','Tag EPC','Pasture','First Seen','Latitude','Longitude','GPS Accuracy (m)','Elevation (m)','Read Count','Mode','Operation','Temperature','Conditions','Wind','Humidity']]},
+            {range:'Bovine Beacon Log!A1:I1',values:[['Date','Time','Tag EPC','Target Tag','Pasture','Found','Latitude','Longitude','Operation']]},
+            {range:'Animals!A1:H1',values:[['Tag EPC','Animal ID','Sex','Breed','DOB','Dam Tag','Sire Tag','Notes']]}
+          ]
+        })
+      });
+    })
+    .then(function(r){
+      if(!r.ok) throw new Error('Header write failed');
+      setStep('stepHeaders','done','✅ Headers written');
+      setStep('stepDone','active','⏳ Finalizing...');
+      saveLocal(sheetId,operationName);
+      setTimeout(function(){setStep('stepDone','done','✅ HerdMate workspace ready!');setTimeout(function(){launchApp();},800);},500);
+    })
+    .catch(function(err){
+      btn.disabled=false; btn.textContent='Set Up My HerdMate →';
+      showToast('Setup failed — check connection',true);
+    });
+  };
+  function setStep(id,state,text){var el=document.getElementById(id);if(!el)return;el.textContent=text;el.className='step '+state;}
+
+  function setSheetsBar(state,msg){var el=document.getElementById('sheetsBar');if(!el)return;el.textContent=msg;el.className='status-bar sheets-'+state;}
+  function writeToSheet(record, mode) {
+    if(!accessToken||!sheetId){record.synced=false;queueAdd(record,mode);renderTable();return;}
+    var tab=mode==='Bovine Beacon'?'Bovine Beacon Log':'Head Count';
+    var row;
+    if(mode==='Bovine Beacon'){
+      row=[[record.date,record.time,record.tag,bbTarget,record.pasture,record.isTarget?'YES':'NO',record.gps?record.gps.lat:'',record.gps?record.gps.lng:'',operationName]];
+    } else {
+      row=[[record.pasture,record.firstDate,record.tag,record.pasture,record.firstTime,
+        record.firstGPS?record.firstGPS.lat:'',
+        record.firstGPS?record.firstGPS.lng:'',
+        record.firstGPS?record.firstGPS.acc:'',
+        record.firstGPS&&record.firstGPS.alt!==null?record.firstGPS.alt:'',
+        record.readCount,'Head Count',operationName,
+        record.weather?record.weather.temp:'',
+        record.weather?record.weather.condition:'',
+        record.weather?record.weather.wind:'',
+        record.weather?record.weather.humidity:'']];
+    }
+    fetch('https://sheets.googleapis.com/v4/spreadsheets/'+sheetId+'/values/'+encodeURIComponent(tab)+'!A:L/append?valueInputOption=RAW&insertDataOption=INSERT_ROWS',{
+      method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify({values:row})
+    }).then(function(r){
+      if(r.ok){
+        if(record.synced!==undefined){record.synced=true;renderTable();}
+        setSheetsBar('ok','✅ Synced — '+operationName);
+      } else {
+        if(record.synced!==undefined){record.synced=false;renderTable();}
+        queueAdd(record,mode);
+        setSheetsBar('err','❌ Sync failed — saved offline');
+      }
+    }).catch(function(){
+      if(record.synced!==undefined){record.synced=false;renderTable();}
+      queueAdd(record,mode);
+      setSheetsBar('err','❌ Offline — saved to device');
+    });
+  }
+
+  function updateSheetWeather(record) {
+    if (!accessToken || !sheetId || !record.weather) return;
+    var tab = 'Head Count';
+    var row = [[record.pasture, record.firstDate, record.tag, record.pasture, record.firstTime,
+      record.firstGPS ? record.firstGPS.lat : '',
+      record.firstGPS ? record.firstGPS.lng : '',
+      record.firstGPS ? record.firstGPS.acc : '',
+      record.firstGPS && record.firstGPS.alt !== null ? record.firstGPS.alt : '',
+      record.readCount, 'Head Count', operationName,
+      record.weather.temp,
+      record.weather.condition,
+      record.weather.wind,
+      record.weather.humidity]];
+    fetch('https://sheets.googleapis.com/v4/spreadsheets/' + sheetId + '/values/' + encodeURIComponent(tab) + '!A:L/append?valueInputOption=RAW&insertDataOption=INSERT_ROWS', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: row })
+    }).catch(function() {});
+  }
+
+  window.toggleMode=function(){dayMode=!dayMode;document.getElementById('app').className=dayMode?'day':'';document.getElementById('modeBtn').textContent=dayMode?'🌙':'☀️';};
+
+  document.getElementById('pastureInput').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();setPasture();}});
+  document.getElementById('tagInput').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addTag();}});
+  document.getElementById('targetInput').addEventListener('input',function(){updateHeadcountBanner();});
+
+  window.setPasture=function(){
+    var name=document.getElementById('pastureInput').value.trim();
+    if(!name){showToast('Enter a pasture name',true);return;}
+    currentPasture=name;
+    document.getElementById('pastureInput').value='';
+    document.getElementById('activeName').textContent=name;
+    document.getElementById('activeName').className='active-name';
+    document.getElementById('scanDot').className='dot blink';
+    document.getElementById('scanHint').textContent='Ready — scanning: '+name;
+    document.getElementById('scanHint').className='scan-hint';
+    document.getElementById('tagInput').disabled=false;
+    document.getElementById('tagInput').placeholder='Scan or type EPC tag...';
+    document.getElementById('addBtn').disabled=false;
+    document.getElementById('headcountBanner').style.display='flex';
+    document.getElementById('headcountPasture').textContent=name;
+    document.getElementById('headcountNum').textContent='0';
+    document.getElementById('completeBadge').style.display='none';
+    document.getElementById('headcountBanner').className='headcount-banner';
+    document.getElementById('tagInput').focus();
+    showToast('Pasture: '+name);
+    renderTabs();
+  };
+
+  window.addTag=function(){
+    var raw=document.getElementById('tagInput').value.trim().toUpperCase();
+    if(!raw||!currentPasture)return;
+    document.getElementById('tagInput').value='';
+    processIncomingTag(raw);
+    document.getElementById('tagInput').focus();
+  };
+
+  function processHCTag(raw) {
+    playScanTick();
+    var now=new Date();
+    var timeStr=now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    var dateStr=now.toLocaleDateString();
+    var gps=lastGPS?{lat:lastGPS.lat,lng:lastGPS.lng,acc:lastGPS.acc,alt:lastGPS.alt,altAcc:lastGPS.altAcc,stamp:lastGPS.stamp}:null;
+    var key=raw+'__'+currentPasture;
+    if(uniqueTags[key]){
+      uniqueTags[key].readCount++;
+      uniqueTags[key].lastTime=timeStr;
+      renderTable();updateStats();updateHeadcountBanner();
+    } else {
+      var record={tag:raw,pasture:currentPasture,firstTime:timeStr,firstDate:dateStr,lastTime:timeStr,firstGPS:gps,readCount:1,synced:null,weather:null};
+      uniqueTags[key]=record;
+      var zone=document.getElementById('scanZone');
+      zone.className='scan-zone lit';
+      setTimeout(function(){zone.className='scan-zone';},350);
+      renderTable();renderTabs();updateStats();updateHeadcountBanner();
+      showToast('NEW: '+raw);
+      writeToSheet(record, 'Head Count');
+      if (gps) {
+        fetchWeather(gps.lat, gps.lng, function(weather) {
+          record.weather = weather;
+          renderTable();
+          updateSheetWeather(record);
+        });
+      }
+    }
+  }
+
+  function updateHeadcountBanner(){
+    var keys=Object.keys(uniqueTags).filter(function(k){return uniqueTags[k].pasture===currentPasture;});
+    var count=keys.length;
+    document.getElementById('headcountNum').textContent=count;
+    var target=parseInt(document.getElementById('targetInput').value)||0;
+    var banner=document.getElementById('headcountBanner');
+    var badge=document.getElementById('completeBadge');
+    if(target>0&&count>=target&&count>0){
+      if(banner.className!=='headcount-banner complete'){
+        banner.className='headcount-banner complete';
+        badge.style.display='inline-block';
+        playHeadCountComplete(count);
+      }
+    } else {banner.className='headcount-banner';badge.style.display='none';}
+  }
+
+  document.getElementById('bbPastureInput').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();setBBPasture();}});
+  document.getElementById('bbTagInput').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();setBeaconTarget();}});
+  document.getElementById('bbScanInput').addEventListener('keydown',function(e){
+    if(e.key==='Enter'){e.preventDefault();var v=document.getElementById('bbScanInput').value.trim().toUpperCase();document.getElementById('bbScanInput').value='';if(v)processBBScan(v);}
+  });
+
+  window.setBBPasture=function(){bbPasture=document.getElementById('bbPastureInput').value.trim();if(!bbPasture){showToast('Enter pasture',true);return;}showToast('BB Pasture: '+bbPasture);};
+  window.setBeaconTarget=function(){
+    var t=document.getElementById('bbTagInput').value.trim().toUpperCase();
+    if(!t){showToast('Enter a tag to find',true);return;}
+    bbTarget=t;bbFound=false;bbActive=true;bbScans=[];
+    document.getElementById('bbScanned').textContent='0';
+    document.getElementById('bbFound').textContent='—';
+    document.getElementById('bbFound').style.color='var(--muted)';
+    document.getElementById('bbDot').className='dot blink-blue';
+    document.getElementById('bbActiveName').textContent='Hunting: '+t;
+    document.getElementById('bbActiveName').className='active-name blue';
+    document.getElementById('bbStatus').className='bb-status searching';
+    document.getElementById('bbStatus').innerHTML='<div class="bb-status-icon">🔍</div><div class="bb-status-text">Scanning... searching for tag</div><div class="bb-target-display">Target: '+esc(t)+'</div>';
+    renderBBTable();
+    showToast('Bovine Beacon active','blue');
+    if (vibOn) startJawsHaptics();
+  };
+
+  function processBBScan(raw){
+    if(!bbActive||!raw)return;
+    if(!isValidCattleTag(raw))return;
+    if(isDebounceDuplicate('bb_'+raw))return;
+    var now=new Date();
+    var timeStr=now.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    var dateStr=now.toLocaleDateString();
+    var gps=lastGPS?{lat:lastGPS.lat,lng:lastGPS.lng,acc:lastGPS.acc}:null;
+    var isTarget=raw===bbTarget;
+    var scanRecord={tag:raw,time:timeStr,date:dateStr,isTarget:isTarget,gps:gps,pasture:bbPasture};
+    bbScans.unshift(scanRecord);
+    document.getElementById('bbScanned').textContent=bbScans.length;
+    writeToSheet(scanRecord,'Bovine Beacon');
+    if(isTarget&&!bbFound){
+      bbFound=true;
+      stopJawsHaptics();
+      document.getElementById('bbStatus').className='bb-status found';
+      document.getElementById('bbStatus').innerHTML='<div class="bb-status-icon">✅</div><div class="bb-status-text">ANIMAL LOCATED!</div><div class="bb-target-display">'+esc(raw)+(gps?'<br>📍 '+gps.lat+', '+gps.lng:'')+'</div>';
+      document.getElementById('bbDot').className='dot blink';
+      document.getElementById('bbActiveName').textContent='FOUND: '+raw;
+      document.getElementById('bbActiveName').className='active-name';
+      document.getElementById('bbFound').textContent='YES';
+      document.getElementById('bbFound').style.color='var(--green)';
+      playFoundAlert(raw);
+      showToast('🎯 FOUND: '+raw,'good');
+    } else if(!isTarget){playScanTick();}
+    renderBBTable();
+  }
+
+  function renderBBTable(){
+    var tbody=document.getElementById('bbTbody');
+    if(!bbScans.length){tbody.innerHTML='<tr><td colspan="4" style="text-align:center;padding:24px;color:var(--muted)">No scans yet</td></tr>';return;}
+    tbody.innerHTML=bbScans.map(function(s){
+      var gpsHtml=s.gps?'<span class="gps-line ok">📍 '+s.gps.lat+', '+s.gps.lng+'</span>':'<span class="gps-line">No GPS</span>';
+      return '<tr class="'+(s.isTarget?'found-row':'')+'"><td style="font-size:.78rem;color:var(--muted)">'+s.time+'</td><td class="tag-id">'+esc(s.tag)+'</td><td>'+(s.isTarget?'<span style="color:var(--green);font-weight:700;font-family:Oswald,sans-serif">🎯 TARGET</span>':'<span style="color:var(--muted);font-size:.78rem">—</span>')+'</td><td>'+gpsHtml+'</td></tr>';
+    }).join('');
+  }
+
+  window.setFilter=function(name){filterPasture=name;renderTable();renderTabs();};
+  function renderTabs(){
+    var pastures=[];
+    Object.keys(uniqueTags).forEach(function(k){var p=uniqueTags[k].pasture;if(pastures.indexOf(p)===-1)pastures.push(p);});
+    var el=document.getElementById('tabs');
+    var total=Object.keys(uniqueTags).length;
+    if(!pastures.length){el.innerHTML='';return;}
+    var h='<div class="tab '+(filterPasture==='all'?'on':'')+'" onclick="setFilter(\'all\')">All <span class="cnt">'+total+'</span></div>';
+    pastures.forEach(function(p){
+      var cnt=Object.keys(uniqueTags).filter(function(k){return uniqueTags[k].pasture===p;}).length;
+      h+='<div class="tab '+(filterPasture===p?'on':'')+'" onclick="setFilter(\''+p.replace(/'/g,'')+'\')">'+esc(p)+' <span class="cnt">'+cnt+'</span></div>';
+    });
+    el.innerHTML=h;
+  }
+
+  function renderTable(){
+    var tbody=document.getElementById('tbody');
+    var keys=Object.keys(uniqueTags);
+    var filtered=filterPasture==='all'?keys:keys.filter(function(k){return uniqueTags[k].pasture===filterPasture;});
+    if(!filtered.length){
+      tbody.innerHTML='<tr><td colspan="6"><div style="text-align:center;padding:48px 20px;color:var(--muted)"><div style="font-size:2.8rem;margin-bottom:12px;opacity:.4">🐄</div><p style="font-size:.9rem;line-height:1.6">'+(keys.length===0?'Set a pasture and start scanning.<br>One row per animal.':'No tags in this pasture yet.')+'</p></div></td></tr>';
+      return;
+    }
+    var rows='';
+    filtered.forEach(function(k,i){
+      var r=uniqueTags[k];
+      var gpsHtml=r.firstGPS
+        ?'<span class="gps-line ok">📍 '+r.firstGPS.lat+', '+r.firstGPS.lng+' (±'+r.firstGPS.acc+'m)'+(r.firstGPS.alt!==null?' | '+r.firstGPS.alt+'m':'')+'</span>'
+        :'<span class="gps-line">No GPS</span>';
+      var weatherHtml=r.weather
+        ?'<span class="gps-line ok">🌤 '+r.weather.temp+' · '+r.weather.condition+'</span>'
+        :(r.firstGPS?'<span class="gps-line" style="color:#555">⏳ fetching weather...</span>':'');
+      var syncHtml=r.synced===null?'<span style="color:var(--orange);font-size:.8rem">⏳</span>':r.synced?'<span style="color:var(--green);font-size:.8rem">✅</span>':'<span style="color:var(--red);font-size:.75rem">⚠️</span>';
+      rows+='<tr class="'+(i===0?'flash':'')+'"><td style="color:var(--muted);font-size:.75rem">'+(filtered.length-i)+'</td><td class="tag-id">'+esc(r.tag)+'</td><td><span class="chip">'+esc(r.pasture)+'</span></td><td><span style="font-size:.82rem">'+r.firstTime+'</span>'+gpsHtml+'</td><td><span class="read-count">'+r.readCount+'x</span></td><td>'+syncHtml+'</td></tr>';
+    });
+    tbody.innerHTML=rows;
+  }
+
+  function updateStats(){
+    var total=0;Object.keys(uniqueTags).forEach(function(k){total+=uniqueTags[k].readCount;});
+    document.getElementById('nTotal').textContent=total;
+    document.getElementById('nUnique').textContent=Object.keys(uniqueTags).length;
+    var p={};Object.keys(uniqueTags).forEach(function(k){p[uniqueTags[k].pasture]=1;});
+    document.getElementById('nPasture').textContent=Object.keys(p).length;
+  }
+
+  window.clearAll=function(){
+    if(!Object.keys(uniqueTags).length&&!bbScans.length)return;
+    if(!confirm('Clear scan data?\n\nData already synced to Google Sheets is kept there.'))return;
+    uniqueTags={};lastScanTime={};bbScans=[];filterPasture='all';bbFound=false;bbActive=false;bbTarget='';
+    document.getElementById('headcountBanner').style.display='none';
+    stopJawsHaptics();
+    document.getElementById('bbStatus').className='bb-status';
+    document.getElementById('bbStatus').innerHTML='<div class="bb-status-icon">📡</div><div class="bb-status-text">Set a target tag to begin hunting</div>';
+    renderTable();renderTabs();updateStats();renderBBTable();
+  };
+
+  var HEADERS=['#','Tag EPC','Pasture','Date','First Seen','Latitude','Longitude','GPS Acc(m)','Read Count'];
+  function getRows(keys){var rows=[HEADERS];keys.forEach(function(k,i){var r=uniqueTags[k];rows.push([i+1,r.tag,r.pasture,r.firstDate,r.firstTime,r.firstGPS?r.firstGPS.lat:'',r.firstGPS?r.firstGPS.lng:'',r.firstGPS?r.firstGPS.acc:'',r.readCount]);});return rows;}
+  window.exportCSV=function(){if(!Object.keys(uniqueTags).length){showToast('No data');return;}var rows=getRows(Object.keys(uniqueTags));dl('herdmate-headcount.csv','text/csv',rows.map(function(r){return r.map(function(c){return '"'+String(c).replace(/"/g,'""')+'"';}).join(',');}).join('\n'));showToast('CSV exported!');};
+  window.exportByPasture=function(){
+    if(!Object.keys(uniqueTags).length){showToast('No data');return;}
+    var ps=[];Object.keys(uniqueTags).forEach(function(k){var p=uniqueTags[k].pasture;if(ps.indexOf(p)===-1)ps.push(p);});
+    var csv='';
+    ps.forEach(function(p){var keys=Object.keys(uniqueTags).filter(function(k){return uniqueTags[k].pasture===p;});csv+='"PASTURE: '+p+' — '+keys.length+' animals"\n'+HEADERS.map(function(h){return '"'+h+'"';}).join(',')+'\n';keys.forEach(function(k,i){var r=uniqueTags[k];csv+='"'+(i+1)+'","'+r.tag+'","'+r.pasture+'","'+r.firstDate+'","'+r.firstTime+'","'+(r.firstGPS?r.firstGPS.lat:'')+'","'+(r.firstGPS?r.firstGPS.lng:'')+'","'+(r.firstGPS?r.firstGPS.acc:'')+'","'+r.readCount+'"\n';});csv+='\n';});
+    dl('herdmate-by-pasture.csv','text/csv',csv);showToast('Exported by pasture!');
+  };
+  window.exportExcel=function(){if(!Object.keys(uniqueTags).length){showToast('No data');return;}var rows=getRows(Object.keys(uniqueTags));dl('herdmate-headcount.xls','application/vnd.ms-excel',rows.map(function(r){return r.join('\t');}).join('\n'));showToast('Excel exported!');};
+  function dl(name,type,content){var b=new Blob([content],{type:type});var a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;a.click();}
+
+  function showToast(msg,type){
+    var t=document.getElementById('toast');
+    t.textContent=msg;
+    t.className='toast '+(type==='blue'?'blue':type==='good'?'good':type===true||type==='warn'?'warn':'')+' show';
+    clearTimeout(t._timer);
+    t._timer=setTimeout(function(){t.className='toast'+(type==='blue'?' blue':type==='good'?' good':type===true||type==='warn'?' warn':'');},2500);
+  }
+  function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+  var lastWeather = null;
+  var lastWeatherFetch = 0;
+  var lastWeatherCoords = null;
+  var WEATHER_CACHE_MS = 5 * 60 * 1000;
+
+  function fetchWeather(lat, lng, callback) {
+    var now = Date.now();
+    if (lastWeather && (now - lastWeatherFetch) < WEATHER_CACHE_MS) {
+      callback(lastWeather);
+      return;
+    }
+    fetch('https://weather.herdmate.ag/weather?lat=' + lat + '&lng=' + lng)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.temp) throw new Error('No weather data');
+      lastWeather = data;
+      lastWeatherFetch = Date.now();
+      callback(data);
+    })
+    .catch(function() { callback(null); });
+  }
+
+  var jawsInterval = null;
+  var jawsRSSI = -80;
+
+  function startJawsHaptics() {
+    stopJawsHaptics();
+    updateJawsHaptics();
+  }
+
+  function stopJawsHaptics() {
+    if (jawsInterval) { clearTimeout(jawsInterval); jawsInterval = null; }
+    if (navigator.vibrate) navigator.vibrate(0);
+  }
+
+  function updateJawsHaptics() {
+    var rssi = jawsRSSI;
+    var normalized = Math.max(0, Math.min(1, (rssi + 90) / 60));
+    var pauseMs = Math.round(1500 - (normalized * 1200));
+    var pulseMs = Math.round(150 + (normalized * 100));
+
+    if (navigator.vibrate) {
+      navigator.vibrate([pulseMs, 80, pulseMs]);
+    }
+
+    jawsInterval = setTimeout(function() {
+      if (bbActive && !bbFound) {
+        updateJawsHaptics();
+      }
+    }, pauseMs + pulseMs * 2 + 80);
+  }
+
+  function updateRSSIFromBLE(rssiValue) {
+    jawsRSSI = rssiValue || -80;
+  }
+
+  var rotationLocked = false;
+  window.toggleRotation = function() {
+    if (!screen.orientation || !screen.orientation.lock) {
+      showToast('Rotation lock not supported on this device', true);
+      return;
+    }
+    if (rotationLocked) {
+      screen.orientation.unlock();
+      rotationLocked = false;
+      document.getElementById('lockBtn').textContent = '🔄';
+      document.getElementById('lockBtn').style.borderColor = '';
+      showToast('Screen rotation unlocked');
+    } else {
+      var orientation = window.innerWidth > window.innerHeight ? 'landscape' : 'portrait';
+      screen.orientation.lock(orientation).then(function() {
+        rotationLocked = true;
+        document.getElementById('lockBtn').textContent = '🔒';
+        document.getElementById('lockBtn').style.borderColor = 'var(--orange)';
+        showToast('Screen rotation locked');
+      }).catch(function() {
+        showToast('Could not lock rotation', true);
+      });
+    }
+  };
+
+  var PASTURES_KEY = 'hm_saved_pastures';
+
+  function savedPasturesLoad() {
+    try { return JSON.parse(localStorage.getItem(PASTURES_KEY) || '[]'); } catch(e) { return []; }
+  }
+  function savedPasturesSave(list) {
+    try { localStorage.setItem(PASTURES_KEY, JSON.stringify(list)); } catch(e) {}
+  }
+
+  function renderSavedPastures() {
+    var list = savedPasturesLoad();
+    var el = document.getElementById('savedPasturesList');
+    if (!el) return;
+    if (!list.length) {
+      el.innerHTML = '<span style="font-size:0.72rem;color:var(--muted);font-style:italic;">None saved — tap Edit to add</span>';
+      return;
+    }
+    el.innerHTML = list.map(function(p, i) {
+      return '<button onclick="quickSetPasture(' + i + ')" style="background:var(--orange-dim);border:1px solid var(--orange-muted);border-radius:6px;color:var(--orange);font-family:Oswald,sans-serif;font-size:0.75rem;font-weight:600;padding:5px 10px;cursor:pointer;min-height:30px;white-space:nowrap;">' +
+        esc(p.name) + (p.target ? ' <span style="opacity:0.7;font-size:0.65rem;">(' + p.target + ')</span>' : '') +
+        '</button>';
+    }).join('');
+  }
+
+  window.quickSetPasture = function(idx) {
+    var list = savedPasturesLoad();
+    var p = list[idx];
+    if (!p) return;
+    document.getElementById('pastureInput').value = p.name;
+    if (p.target) document.getElementById('targetInput').value = p.target;
+    setPasture();
+    if (p.target) updateHeadcountBanner();
+  };
+
+  window.showPastureManager = function() {
+    var list = savedPasturesLoad();
+    var existing = document.getElementById('pastureManagerModal');
+    if (existing) existing.remove();
+
+    var overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.id = 'pastureManagerModal';
+    overlay.onclick = function(e) { if (e.target === overlay) closePastureManager(); };
+
+    var sheet = document.createElement('div');
+    sheet.className = 'modal-sheet';
+
+    function buildRows() {
+      var current = savedPasturesLoad();
+      return current.map(function(p, i) {
+        return '<div class="pasture-item" id="pitem_' + i + '">' +
+          '<div style="flex:1">' +
+            '<div class="pasture-item-label">Pasture Name</div>' +
+            '<input type="text" value="' + esc(p.name) + '" id="pname_' + i + '" placeholder="Pasture name" />' +
+          '</div>' +
+          '<div style="width:70px">' +
+            '<div class="pasture-item-label">Target</div>' +
+            '<input type="number" value="' + (p.target || '') + '" id="ptarget_' + i + '" placeholder="—" class="target-input" min="1" max="9999" />' +
+          '</div>' +
+          '<button class="del-pasture" onclick="deletePastureItem(' + i + ')">🗑</button>' +
+        '</div>';
+      }).join('');
+    }
+
+    sheet.innerHTML =
+      '<button class="modal-close" onclick="closePastureManager()">✕</button>' +
+      '<div class="modal-title">📍 Saved Pastures</div>' +
+      '<div class="modal-desc">Tap a pasture to set it instantly. Edit names and target head counts here.</div>' +
+      '<div id="pastureItemsList">' + buildRows() + '</div>' +
+      '<button class="modal-add-btn" onclick="addPastureItem()">+ Add Pasture</button>' +
+      '<button class="modal-save-btn" onclick="savePastureManager()">Save Pastures</button>';
+
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+  };
+
+  window.addPastureItem = function() {
+    var list = savedPasturesLoad();
+    list.push({ name: '', target: '' });
+    savedPasturesSave(list);
+    showPastureManager();
+  };
+
+  window.deletePastureItem = function(idx) {
+    var list = savedPasturesLoad();
+    list.splice(idx, 1);
+    savedPasturesSave(list);
+    showPastureManager();
+  };
+
+  window.savePastureManager = function() {
+    var list = savedPasturesLoad();
+    var newList = [];
+    list.forEach(function(p, i) {
+      var nameEl = document.getElementById('pname_' + i);
+      var targetEl = document.getElementById('ptarget_' + i);
+      if (nameEl && nameEl.value.trim()) {
+        newList.push({
+          name: nameEl.value.trim(),
+          target: targetEl ? (parseInt(targetEl.value) || '') : ''
+        });
+      }
+    });
+    savedPasturesSave(newList);
+    closePastureManager();
+    renderSavedPastures();
+    showToast('Pastures saved!');
+  };
+
+  window.closePastureManager = function() {
+    var el = document.getElementById('pastureManagerModal');
+    if (el) el.remove();
+  };
+
+  window.addEventListener('load', function() {
+    var urlEl = document.getElementById('currentUrl');
+    if (urlEl) urlEl.textContent = window.location.href;
+
+    var brave = !!(navigator.brave && navigator.brave.isBrave);
+    if (!isNativeWrapper && (brave || !isChrome())) {
+      showScreen('chromeScreen');
+      return;
+    }
+
+    var oi=document.getElementById('operationInput');
+    if(oi) oi.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();createWorkspace();}});
+
+    var check=setInterval(function(){
+      if(window.google&&window.google.accounts){
+        clearInterval(check);
+        tokenClient=google.accounts.oauth2.initTokenClient({
+          client_id:CLIENT_ID,
+          scope:SCOPES,
+          callback:function(response){
+            if(response.error){showToast('Sign in failed',true);return;}
+            accessToken=response.access_token;
+            localStorage.setItem('hm_google_token', response.access_token);
+            fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+              headers:{Authorization:'Bearer '+response.access_token}
+            }).then(function(r){return r.json();}).then(function(info){
+              if(info.email) localStorage.setItem('hm_user_email', info.email);
+            });
+            onSignedIn();
+          }
+        });
+        showScreen('loginScreen');
+      }
+    },200);
+  });
+
+  renderTable();
+  renderBBTable();
+})();
+</script>
+</body>
+</html>
